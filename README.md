@@ -180,3 +180,112 @@ curl https://YOUR_API_URL/prod/transactions
 層5: Cognito（MFA）  → 不正ログインを防ぐ
 層6: 監視・通知      → すり抜けた攻撃を検知・通知する
 ```
+
+## 🚧 構築時のトラブルシューティング
+
+---
+
+### 1. CognitoAuthorizerがRestApiに紐付けられていないエラー
+
+**エラー内容**
+```
+Authorizer must be attached to a RestApi
+```
+
+**原因**
+
+CognitoAuthorizerを定義したがどのAPIメソッドにも紐付けずに放置していたため発生しました。CDKはコンストラクトを定義した場合は必ず使用することを要求します。
+
+**解決方法**
+
+今回はLambda Authorizerをメインで使う設計のためCognitoAuthorizerの定義を丸ごと削除しました。
+
+---
+
+### 2. スタック間の循環参照エラー
+
+**エラー内容**
+```
+Adding this dependency would create a cyclic reference
+```
+
+**原因**
+
+以下のような循環依存が発生していました。
+```
+ApiStack → LambdaAuthorizerStack → ApiStack → ...（無限ループ）
+```
+
+**解決方法**
+
+LambdaAuthorizerStackを廃止してLambda AuthorizerをApiStackの中に統合しました。スタックを分割する際は依存関係が常に一方通行になるよう設計する必要があります。
+```
+修正前:
+LambdaAuthorizerStack（別スタック）
+ApiStack → LambdaAuthorizerStackに依存
+
+修正後:
+ApiStack（Lambda Authorizerを内包）
+```
+
+---
+
+### 3. WAFとAPI Gatewayの紐付けエラー
+
+**エラー内容**
+```
+AWS WAF couldn't perform the operation because your resource doesn't exist
+```
+
+**原因**
+
+WAFとAPI GatewayのステージをCDKで同時にデプロイしようとしたとき、API Gatewayのステージ（prod）がまだ作成されていない状態でWAFの紐付けが実行されたため発生しました。
+
+**解決方法**
+
+CDKでのWAF紐付けを断念してWAFの紐付けコードを削除しました。本番環境ではデプロイ後に手動またはカスタムリソースを使って紐付けを行う方法が確実です。
+```typescript
+// 削除したコード
+new cdk.CfnResource(this, 'WafAssociation', {
+  type: 'AWS::WAFv2::WebACLAssociation',
+  properties: {
+    ResourceArn: `arn:aws:apigateway:...`,
+    WebACLArn: props.webAclArn,
+  },
+});
+```
+
+---
+
+### 4. CloudWatch Logsロールエラー
+
+**エラー内容**
+```
+CloudWatch Logs role ARN must be set in account settings to enable logging
+```
+
+**原因**
+
+API GatewayがCloudWatchにログを送信するにはAWSアカウントレベルでIAMロールの設定が必要ですが、その設定がされていない状態でloggingLevelを設定したため発生しました。
+
+**解決方法**
+
+`deployOptions`からlogging関連の設定を削除しました。本番環境でログを有効にする場合はAWSコンソールのAPI Gateway設定でCloudWatch Logsロールを設定してから有効化する必要があります。
+```typescript
+// 削除したコード
+deployOptions: {
+  loggingLevel: apigateway.MethodLoggingLevel.INFO,
+  dataTraceEnabled: true,
+},
+```
+
+---
+
+## 💡 構築を通じた学び
+
+| 学んだこと | 内容 |
+|-----------|------|
+| CDKスタック設計 | 依存関係は常に一方通行にする。密接に関連するリソースは同じスタックにまとめる |
+| WAFの統合タイミング | デプロイ順序を考慮しないとリソースが存在しないエラーが発生する |
+| ログ設定の前提条件 | AWSサービスのログ有効化にはアカウントレベルの事前設定が必要な場合がある |
+| 最小構成から始める | 複雑な設定を一度に入れず、動く最小構成から段階的に機能を追加する |
